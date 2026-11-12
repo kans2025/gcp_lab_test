@@ -1,0 +1,56 @@
+name: Deploy Cloud Run Canary
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Build & Deploy Canary
+    runs-on: ubuntu-latest
+
+    # Required for Workload Identity Federation (WIF) OIDC token minting
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      # 1. Authenticate to Google Cloud keylessly using WIF
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER_NAME }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      # 2. Set up gcloud CLI
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 3. Configure Docker authentication for Artifact Registry
+      - name: Authorize Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      # 4. Build and push Docker image to Artifact Registry
+      - name: Build and Push Docker Image
+        id: build-image
+        run: |
+          IMAGE="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/lab-repo/orders-consumer:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image_url=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      # 5. Deploy new revision to Cloud Run with zero traffic and 'canary' tag
+      - name: Deploy to Cloud Run (Canary)
+        run: |
+          gcloud run deploy orders-service \
+            --image "${{ steps.build-image.outputs.image_url }}" \
+            --region us-central1 \
+            --no-traffic \
+            --tag canary \
+            --quiet
